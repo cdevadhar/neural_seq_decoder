@@ -55,6 +55,25 @@ def getDatasetLoaders(
 
     return train_loader, test_loader, loadedData
 
+def apply_time_masking(X, mask_width=20):
+    """
+    X: [num_seqs, seq_len, n_features]
+    """
+    num_seqs, seq_len, n_features = X.shape
+
+    start_idx = torch.randint(0, max(seq_len - mask_width + 1, 1), (num_seqs,), device=X.device,)
+    end_idx = start_idx + mask_width
+    end_idx = torch.clamp(end_idx, max=seq_len)
+
+    mask = torch.ones((num_seqs, seq_len), device=X.device, dtype=X.dtype)
+
+    for i in range(num_seqs):
+        mask[i, start_idx[i]:end_idx[i]] = 0
+
+    mask = mask.unsqueeze(-1)
+
+    return X * mask
+
 def trainModel(args):
     os.makedirs(args["outputDir"], exist_ok=True)
     torch.manual_seed(args["seed"])
@@ -84,7 +103,7 @@ def trainModel(args):
     ).to(device)
 
     loss_ctc = torch.nn.CTCLoss(blank=0, reduction="mean", zero_infinity=True)
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args["lrStart"],
         betas=(0.9, 0.999),
@@ -113,7 +132,9 @@ def trainModel(args):
             y_len.to(device),
             dayIdx.to(device),
         )
-
+        
+        # print(batch)
+        X = apply_time_masking(X)
         # Noise augmentation is faster on GPU
         if args["whiteNoiseSD"] > 0:
             X += torch.randn(X.shape, device=device) * args["whiteNoiseSD"]
