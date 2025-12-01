@@ -27,7 +27,8 @@ class SpeechDataset(Dataset):
 
     def __getitem__(self, idx):
         neural_feats = torch.tensor(self.neural_feats[idx], dtype=torch.float32)
-
+        # print(neural_feats.min())
+        # print(neural_feats.max())
         if self.transform:
             neural_feats = self.transform(neural_feats)
 

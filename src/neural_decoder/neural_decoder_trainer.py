@@ -55,7 +55,7 @@ def getDatasetLoaders(
 
     return train_loader, test_loader, loadedData
 
-def apply_time_masking(X, mask_width=10):
+def apply_time_masking(X, mask_width=20):
     num_seqs, seq_len, n_features = X.shape
 
     start_idx = torch.randint(0, max(seq_len - mask_width + 1, 1), (num_seqs,), device=X.device,)
@@ -71,7 +71,7 @@ def apply_time_masking(X, mask_width=10):
 
     return X * mask
 
-def apply_feature_masking(X, mask_percentage=0.02):
+def apply_feature_masking(X, mask_percentage=0.1):
     num_seqs, seq_len, n_features = X.shape
     # num_seqs * n_features matrix: for each ssequence, which neurons to include vs mask
     mask = (torch.rand(num_seqs, n_features, device=X.device) > mask_percentage).float()
@@ -108,18 +108,24 @@ def trainModel(args):
         bidirectional=args["bidirectional"],
     ).to(device)
     loss_ctc = torch.nn.CTCLoss(blank=0, reduction="mean", zero_infinity=True)
-    optimizer = torch.optim.AdamW(
+    # optimizer = torch.optim.AdamW(
+    #     model.parameters(),
+    #     lr=args["lrStart"],
+    #     betas=(0.9, 0.999),
+    #     eps=0.1,
+    #     weight_decay=args["l2_decay"],
+    # )
+    optimizer = torch.optim.SGD(
         model.parameters(),
-        lr=args["lrStart"],
-        betas=(0.9, 0.999),
-        eps=0.1,
-        weight_decay=args["l2_decay"],
+        lr=args["lrStart"],      # base learning rate
+        momentum=0.9,            # standard momentum value
+        weight_decay=args["l2_decay"],  # L2 regularization
+        nesterov=True            # optional: True if you want Nesterov momentum
     )
-    scheduler = torch.optim.lr_scheduler.LinearLR(
+    scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer,
-        start_factor=1.0,
-        end_factor=args["lrEnd"] / args["lrStart"],
-        total_iters=args["nBatch"],
+        step_size=4000,   # how often to decay (in batches)
+        gamma=0.1  
     )
 
     # --train--
@@ -161,7 +167,7 @@ def trainModel(args):
             y_len,
         )
         loss = torch.sum(loss)
-
+        print(loss)
         # Backpropagation
         optimizer.zero_grad()
         loss.backward()
