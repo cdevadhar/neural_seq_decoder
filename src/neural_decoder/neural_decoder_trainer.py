@@ -9,7 +9,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 
-from .model import GRUDecoder
+from .model import GRUDecoder, LabelSmoothingCTCLoss
 from .dataset import SpeechDataset
 
 
@@ -107,21 +107,28 @@ def trainModel(args):
         gaussianSmoothWidth=args["gaussianSmoothWidth"],
         bidirectional=args["bidirectional"],
     ).to(device)
-    loss_ctc = torch.nn.CTCLoss(blank=0, reduction="mean", zero_infinity=True)
-    # optimizer = torch.optim.AdamW(
-    #     model.parameters(),
-    #     lr=args["lrStart"],
-    #     betas=(0.9, 0.999),
-    #     eps=0.1,
-    #     weight_decay=args["l2_decay"],
-    # )
-    optimizer = torch.optim.SGD(
-        model.parameters(),
-        lr=args["lrStart"],      # base learning rate
-        momentum=0.9,            # standard momentum value
-        weight_decay=args["l2_decay"],  # L2 regularization
-        nesterov=True            # optional: True if you want Nesterov momentum
+    # Use label-smoothed CTC loss if requested; keep reduction='none' so
+    # the existing code's `torch.sum(loss)` behavior remains the same.
+    loss_ctc = LabelSmoothingCTCLoss(
+        blank=0,
+        smoothing=args.get("labelSmoothing", 0.0),
+        reduction="none",
+        zero_infinity=True,
     )
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args["lrStart"],
+        betas=(0.9, 0.999),
+        eps=0.1,
+        weight_decay=args["l2_decay"],
+    )
+    # optimizer = torch.optim.SGD(
+    #     model.parameters(),
+    #     lr=args["lrStart"],      # base learning rate
+    #     momentum=0.9,            # standard momentum value
+    #     weight_decay=args["l2_decay"],  # L2 regularization
+    #     nesterov=True            # optional: True if you want Nesterov momentum
+    # )
     scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer,
         step_size=4000,   # how often to decay (in batches)
