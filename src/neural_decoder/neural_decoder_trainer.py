@@ -55,6 +55,32 @@ def getDatasetLoaders(
 
     return train_loader, test_loader, loadedData
 
+def apply_time_masking(X, mask_width=20):
+    num_seqs, seq_len, n_features = X.shape
+
+    start_idx = torch.randint(0, max(seq_len - mask_width + 1, 1), (num_seqs,), device=X.device,)
+    end_idx = start_idx + mask_width
+    end_idx = torch.clamp(end_idx, max=seq_len)
+
+    mask = torch.ones((num_seqs, seq_len), device=X.device, dtype=X.dtype)
+
+    for i in range(num_seqs):
+        mask[i, start_idx[i]:end_idx[i]] = 0
+
+    mask = mask.unsqueeze(-1)
+
+    return X * mask
+
+def apply_feature_masking(X, mask_percentage=0.1):
+    num_seqs, seq_len, n_features = X.shape
+    # num_seqs * n_features matrix: for each ssequence, which neurons to include vs mask
+    mask = (torch.rand(num_seqs, n_features, device=X.device) > mask_percentage).float()
+    # expand it across every bin in that sequence (because the same ones are masked for every bin in the sequence)
+    mask = mask.unsqueeze(1).expand(-1, seq_len, -1)
+
+    # 3. Apply mask (zero out masked features)
+    return X * mask
+
 def trainModel(args):
     os.makedirs(args["outputDir"], exist_ok=True)
     torch.manual_seed(args["seed"])
@@ -84,7 +110,7 @@ def trainModel(args):
     ).to(device)
 
     loss_ctc = torch.nn.CTCLoss(blank=0, reduction="mean", zero_infinity=True)
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args["lrStart"],
         betas=(0.9, 0.999),
@@ -114,6 +140,9 @@ def trainModel(args):
             dayIdx.to(device),
         )
 
+        X = apply_time_masking(X)
+        X = apply_feature_masking(X)
+        
         # Noise augmentation is faster on GPU
         if args["whiteNoiseSD"] > 0:
             X += torch.randn(X.shape, device=device) * args["whiteNoiseSD"]
@@ -134,7 +163,8 @@ def trainModel(args):
             y_len,
         )
         loss = torch.sum(loss)
-
+        if (batch%100==0):
+            print(loss)
         # Backpropagation
         optimizer.zero_grad()
         loss.backward()
