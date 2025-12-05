@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
+from .label_smoothing_ctc import LabelSmoothingCTCLoss
 
 from .model import GRUDecoder
 from .dataset import SpeechDataset
@@ -71,7 +72,7 @@ def apply_time_masking(X, mask_width=20):
 
     return X * mask
 
-def apply_feature_masking(X, mask_percentage=0.1):
+def apply_feature_masking(X, mask_percentage=0.125):
     num_seqs, seq_len, n_features = X.shape
     # num_seqs * n_features matrix: for each ssequence, which neurons to include vs mask
     mask = (torch.rand(num_seqs, n_features, device=X.device) > mask_percentage).float()
@@ -80,6 +81,30 @@ def apply_feature_masking(X, mask_percentage=0.1):
 
     # 3. Apply mask (zero out masked features)
     return X * mask
+
+def beamSearch(model_output, beam_width=5):
+    # print("DOING BEAM SEARCH")
+    device = model_output.device
+    # print(device)
+    log_probabilities = torch.log_softmax(model_output, dim=-1)
+    beams = [(torch.zeros(1, device=device), torch.empty(0, dtype=torch.long, device=device))]
+    for t in range(model_output.shape[0]):
+        new_beams = []
+        for score, seq in beams:
+            topk_log_probs, topk_ids = torch.topk(log_probabilities[t], beam_width)
+            topk_log_probs = topk_log_probs.to(device)
+            topk_ids = topk_ids.to(device)
+            for logp, idx in zip(topk_log_probs, topk_ids):
+                new_seq = torch.cat([seq, idx.unsqueeze(0)])
+                new_beams.append((score + logp.item(), new_seq))
+
+        new_beams.sort(key=lambda x: x[0], reverse=True)
+        beams = new_beams[:beam_width]
+
+    # pick best scoring sequence
+    best_seq = beams[0][1]
+    # print(best_seq)
+    return best_seq
 
 def trainModel(args):
     os.makedirs(args["outputDir"], exist_ok=True)
@@ -109,7 +134,8 @@ def trainModel(args):
         bidirectional=args["bidirectional"],
     ).to(device)
 
-    loss_ctc = torch.nn.CTCLoss(blank=0, reduction="mean", zero_infinity=True)
+    loss_ctc = LabelSmoothingCTCLoss()
+    
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args["lrStart"],
@@ -117,17 +143,17 @@ def trainModel(args):
         eps=0.1,
         weight_decay=args["l2_decay"],
     )
-    scheduler = torch.optim.lr_scheduler.LinearLR(
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer,
-        start_factor=1.0,
-        end_factor=args["lrEnd"] / args["lrStart"],
-        total_iters=args["nBatch"],
+        milestones=[5000, 10000, 15000, 18000, 25000],
+        gamma=0.5
     )
 
     # --train--
     testLoss = []
     testCER = []
     startTime = time.time()
+    avg_training_loss = 0
     for batch in range(args["nBatch"]):
         model.train()
 
@@ -163,8 +189,10 @@ def trainModel(args):
             y_len,
         )
         loss = torch.sum(loss)
+        avg_training_loss+=loss
         if (batch%100==0):
-            print(loss)
+            print(avg_training_loss/100)
+            avg_training_loss = 0
         # Backpropagation
         optimizer.zero_grad()
         loss.backward()
@@ -174,11 +202,12 @@ def trainModel(args):
         # print(endTime - startTime)
 
         # Eval
-        if batch % 100 == 0:
+        if batch % 100 == 0 and batch>0:
             with torch.no_grad():
                 model.eval()
                 allLoss = []
                 total_edit_distance = 0
+                total_edit_distance_beam = 0
                 total_seq_length = 0
                 for X, y, X_len, y_len, testDayIdx in testLoader:
                     X, y, X_len, y_len, testDayIdx = (
@@ -207,6 +236,7 @@ def trainModel(args):
                             torch.tensor(pred[iterIdx, 0 : adjustedLens[iterIdx], :]),
                             dim=-1,
                         )  # [num_seq,]
+
                         decodedSeq = torch.unique_consecutive(decodedSeq, dim=-1)
                         decodedSeq = decodedSeq.cpu().detach().numpy()
                         decodedSeq = np.array([i for i in decodedSeq if i != 0])
@@ -214,11 +244,25 @@ def trainModel(args):
                         trueSeq = np.array(
                             y[iterIdx][0 : y_len[iterIdx]].cpu().detach()
                         )
-
                         matcher = SequenceMatcher(
                             a=trueSeq.tolist(), b=decodedSeq.tolist()
                         )
                         total_edit_distance += matcher.distance()
+
+                        if (batch%500==0):
+                            decodedSeq_beam = beamSearch(
+                                torch.tensor(pred[iterIdx, 0 : adjustedLens[iterIdx], :].cpu())
+                            )
+                            decodedSeq_beam = torch.unique_consecutive(decodedSeq_beam, dim=-1)
+                            decodedSeq_beam = decodedSeq_beam.cpu().detach().numpy()
+                            decodedSeq_beam = np.array([i for i in decodedSeq_beam if i != 0])
+
+                            matcher_beam = SequenceMatcher(
+                                a=trueSeq.tolist(), b=decodedSeq_beam.tolist()
+                            )
+                            total_edit_distance_beam+=matcher_beam.distance()
+
+
                         total_seq_length += len(trueSeq)
 
                 avgDayLoss = np.sum(allLoss) / len(testLoader)
@@ -227,6 +271,11 @@ def trainModel(args):
                 endTime = time.time()
                 print(
                     f"batch {batch}, ctc loss: {avgDayLoss:>7f}, cer: {cer:>7f}, time/batch: {(endTime - startTime)/100:>7.3f}"
+                )
+                if (batch%500==0):
+                    beam_cer = total_edit_distance_beam/total_seq_length
+                    print(
+                    f"batch {batch}, ctc loss: {avgDayLoss:>7f}, beam search cer: {beam_cer:>7f}, time/batch: {(endTime - startTime)/100:>7.3f}"
                 )
                 startTime = time.time()
 
@@ -263,7 +312,7 @@ def loadModel(modelDir, nInputLayers=24, device="cuda"):
     ).to(device)
 
     model.load_state_dict(torch.load(modelWeightPath, map_location=device))
-    return model
+    return model, args
 
 
 @hydra.main(version_base="1.1", config_path="conf", config_name="config")
