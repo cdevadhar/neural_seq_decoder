@@ -82,30 +82,6 @@ def apply_feature_masking(X, mask_percentage=0.125):
     # 3. Apply mask (zero out masked features)
     return X * mask
 
-def beamSearch(model_output, beam_width=5):
-    # print("DOING BEAM SEARCH")
-    device = model_output.device
-    # print(device)
-    log_probabilities = torch.log_softmax(model_output, dim=-1)
-    beams = [(torch.zeros(1, device=device), torch.empty(0, dtype=torch.long, device=device))]
-    for t in range(model_output.shape[0]):
-        new_beams = []
-        for score, seq in beams:
-            topk_log_probs, topk_ids = torch.topk(log_probabilities[t], beam_width)
-            topk_log_probs = topk_log_probs.to(device)
-            topk_ids = topk_ids.to(device)
-            for logp, idx in zip(topk_log_probs, topk_ids):
-                new_seq = torch.cat([seq, idx.unsqueeze(0)])
-                new_beams.append((score + logp.item(), new_seq))
-
-        new_beams.sort(key=lambda x: x[0], reverse=True)
-        beams = new_beams[:beam_width]
-
-    # pick best scoring sequence
-    best_seq = beams[0][1]
-    # print(best_seq)
-    return best_seq
-
 def trainModel(args):
     os.makedirs(args["outputDir"], exist_ok=True)
     torch.manual_seed(args["seed"])
@@ -207,7 +183,6 @@ def trainModel(args):
                 model.eval()
                 allLoss = []
                 total_edit_distance = 0
-                total_edit_distance_beam = 0
                 total_seq_length = 0
                 for X, y, X_len, y_len, testDayIdx in testLoader:
                     X, y, X_len, y_len, testDayIdx = (
@@ -249,19 +224,6 @@ def trainModel(args):
                         )
                         total_edit_distance += matcher.distance()
 
-                        if (batch%500==0):
-                            decodedSeq_beam = beamSearch(
-                                torch.tensor(pred[iterIdx, 0 : adjustedLens[iterIdx], :].cpu())
-                            )
-                            decodedSeq_beam = torch.unique_consecutive(decodedSeq_beam, dim=-1)
-                            decodedSeq_beam = decodedSeq_beam.cpu().detach().numpy()
-                            decodedSeq_beam = np.array([i for i in decodedSeq_beam if i != 0])
-
-                            matcher_beam = SequenceMatcher(
-                                a=trueSeq.tolist(), b=decodedSeq_beam.tolist()
-                            )
-                            total_edit_distance_beam+=matcher_beam.distance()
-
 
                         total_seq_length += len(trueSeq)
 
@@ -271,11 +233,6 @@ def trainModel(args):
                 endTime = time.time()
                 print(
                     f"batch {batch}, ctc loss: {avgDayLoss:>7f}, cer: {cer:>7f}, time/batch: {(endTime - startTime)/100:>7.3f}"
-                )
-                if (batch%500==0):
-                    beam_cer = total_edit_distance_beam/total_seq_length
-                    print(
-                    f"batch {batch}, ctc loss: {avgDayLoss:>7f}, beam search cer: {beam_cer:>7f}, time/batch: {(endTime - startTime)/100:>7.3f}"
                 )
                 startTime = time.time()
 
